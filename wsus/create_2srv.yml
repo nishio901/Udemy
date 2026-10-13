@@ -6,7 +6,7 @@ Parameters:
   Ec2ImageId:
     Description: EC2 ImageID(AMI)
     Type: String 
-    Default: ami-068cc10c5b668e802 #Windows_Server-2019-Japanese-Full-Base-2026.07.15 
+    Default: ami-0653183f80d310bd3 #Windows_Server-2019-Japanese-Full-Base-2026.09.09
   SystemName:
     Type: String
     Default: udemy
