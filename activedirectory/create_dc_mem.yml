@@ -1,0 +1,457 @@
+Parameters:
+  Ec2InstanceType:
+    Description: EC2 InstanceType
+    Type: String
+    Default: t3.medium
+  Ec2ImageId:
+    Description: EC2 ImageID(AMI)
+    Type: String
+    Default: ami-0e951cd6c484ba795 #Windows_Server-2022-Japanese-Full-Base-2026.08.12
+  SystemName:
+    Type: String
+    Default: udemy
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 192.168.1.0/24
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-vpc
+
+  ## InternetGateway
+  IGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-igw
+
+  ## IGWAttachment
+  IGWAttachVPC:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref IGW
+      VpcId: !Ref VPC
+
+  ## Public-Subnet01
+  PublicSubnet01:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 192.168.1.0/26
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-public-subnet
+  
+  ## Public Route
+  PublicRoute:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-public-rtb
+
+  ## Associate PublicSubnet01 to PublicRoute 
+  AssociatePublicSubnet01ToPublicRoute:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRoute
+      SubnetId: !Ref PublicSubnet01
+
+  ## Add PublicRoute IGW
+  AddPublicRouteIGW01:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW
+      RouteTableId: !Ref PublicRoute
+    DependsOn: IGWAttachVPC
+
+  ## DC Securitygroup
+  DCSecuritygroup:   #ec2Securitygroup
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${SystemName}-DC-sg
+      GroupDescription: !Sub ${SystemName}-DC-sg
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-DC-sg
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: 0.0.0.0/0
+        Description: rdp
+      - IpProtocol: ICMP
+        FromPort: -1
+        ToPort: -1
+        CidrIp: 192.168.1.0/26
+        Description: localping
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 192.168.1.0/26
+        Description: all
+      - IpProtocol: udp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 192.168.1.0/26
+        Description: all
+  
+  ## DC Securitygroup
+  SVSecuritygroup:   #ec2Securitygroup
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${SystemName}-SV-sg
+      GroupDescription: !Sub ${SystemName}-SV-sg
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-SV-sg
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: 0.0.0.0/0
+        Description: rdp
+      - IpProtocol: ICMP
+        FromPort: -1
+        ToPort: -1
+        CidrIp: 192.168.1.0/26
+        Description: localping
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 192.168.1.0/26
+        Description: all
+      - IpProtocol: udp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 192.168.1.0/26
+        Description: all
+
+  ## ssm Role
+  SSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      RoleName: !Sub ${SystemName}-ssm-role
+
+  ## ssm Role InstanceProfile
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref SSMRole
+      InstanceProfileName: !Sub ${SystemName}-ssm-role
+
+ ##EC2 IMDSv2
+  IMDSv2LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+        LaunchTemplateName: !Sub ${SystemName}-IMDSV2
+        LaunchTemplateData:
+          MetadataOptions:
+            HttpEndpoint: enabled
+            HttpPutResponseHopLimit: 1
+            HttpTokens: required
+
+ ##EC2
+  Ec2Instance01:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            c:\cfn\cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+            c:\cfn\hooks.d\cfn-auto-reloader.conf:
+              content: !Sub |
+                 [cfn-auto-reloader-hook]
+                 triggers=post.update
+                 path=Resources.Ec2Instance01.Metadata.AWS::CloudFormation::Init
+                 action=cfn-init.exe -v --stack ${AWS::StackName} --resource Ec2Instance01 --region ${AWS::Region}
+            c:\cfn\scripts\Setup-config1.ps1:
+              content: |
+                 $log = "c:\cfn\scripts\Cfnlog.txt"
+                 echo Setup-config1-Start >> $log
+                 tzutil /s "Tokyo Standard Time" >> $log
+                 Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\TimeZoneInformation" -Name "RealTimeIsUniversal" -Value 1
+
+                 #Key Layout
+                 [string]$Path = "HKLM:\SYSTEM\CurrentControlSet\services\i8042prt\Parameters"
+                 Set-ItemProperty -Path $Path -Name "LayerDriver JPN" -Value "kbd106.dll"
+                 Set-ItemProperty -Path $Path -Name "OverrideKeyboardIdentifier" -Value "PCAT_106KEY"
+                 Set-ItemProperty -Path $Path -Name "OverrideKeyboardType" -Value 7
+                 Set-ItemProperty -Path $Path -Name "OverrideKeyboardSubtype" -Value 2
+
+                 Get-NetFirewallProfile | Set-NetFirewallProfile -Enabled false >> $log
+                 net user administrator P@ssw0rd
+                 Rename-Computer -NewName DC01 -Force -Restart 
+                 
+                 echo Setup-config1-End >> $log
+
+            c:\cfn\scripts\Setup-config2.ps1:
+              content: |
+                 $log = "c:\cfn\scripts\Cfnlog.txt"
+                 echo Add-AD-Domain-Services >> $log
+                 Add-WindowsFeature AD-Domain-Services, GPMC, RSAT-ADDS, RSAT-AD-PowerShell, RSAT-DNS-Server >> $log
+
+                 while ($true){
+                     if (Test-Path -Path "C:\memsv01-RenameEndFlag.txt"){
+                         break
+                      }
+                    Start-Sleep -Seconds 10                 
+                   }
+
+                 Import-Module ADDSDeployment
+                 $Params = @{
+                   DomainName        = "corp.local";
+                   DomainNetbiosName = "CORP";
+                   ForestMode        = "WinThreshold";
+                   DomainMode        = "WinThreshold";
+                   DatabasePath      = "C:\Windows\NTDS";
+                   LogPath           = "C:\Windows\NTDS";
+                   SysvolPath        = "C:\Windows\SYSVOL";
+                   SafeModeAdministratorPassword = (ConvertTo-SecureString "P@ssw0rd" -AsPlainText -Force);
+                   InstallDns           = $true;
+                   CreateDnsDelegation  = $false;
+                   NoRebootOnCompletion = $false;
+                   Confirm = $false;
+                 }
+                 Install-ADDSForest @Params >> $log
+                 echo End-of-Setup-config2 >> $log
+            c:\cfn\scripts\Setup-config3.ps1:
+              content: |
+                 $log = "c:\cfn\scripts\Cfnlog.txt"
+                 echo Setup-config3-Start >> $log
+                 New-ADUser ssm-user >> $log
+
+                 dsmod user "CN=administrator,CN=Users,DC=corp,DC=local" -pwdneverexpires yes
+
+                 $computerName = '192.168.1.30'
+                 $adminPass = 'P@ssw0rd'
+                 $adminUser = 'administrator'
+                 $securePass = ConvertTo-SecureString $adminPass -AsPlainText -Force
+                 $cred = New-Object System.Management.Automation.PSCredential "$computerName\$adminUser", $securePass
+                 New-PSDrive -Name 'B' -PSProvider FileSystem -Root "\\$computerName\C`$" -Credential $cred
+                 echo DC-setupEnd >> B:\DC-setupEndFlag.txt
+                 Remove-PSDrive -Name 'B'
+                 echo Setup-config3-End >> $log
+          commands:
+            1-setup-config:
+              command: 'powershell.exe -File c:\cfn\scripts\Setup-config1.ps1'
+              waitAfterCompletion: forever
+            2-setup-config:
+              command: 'powershell.exe -File c:\cfn\scripts\Setup-config2.ps1'
+              waitAfterCompletion: forever
+            3-setup-config:
+              command: 'powershell.exe -File c:\cfn\scripts\Setup-config3.ps1'
+              waitAfterCompletion: '0'  
+          services:
+            windows:
+              cfn-hup:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - c:\cfn\cfn-hup.conf
+                  - c:\cfn\hooks.d\cfn-auto-reloader.conf
+    Properties:
+      InstanceType: !Ref Ec2InstanceType
+      ImageId: !Ref Ec2ImageId
+      LaunchTemplate: 
+        LaunchTemplateName: !Sub ${SystemName}-IMDSV2
+        Version: 1
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - Ref: DCSecuritygroup
+          SubnetId:
+            Ref: PublicSubnet01
+          PrivateIpAddress: 192.168.1.20
+      IamInstanceProfile: !Ref InstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-dc01
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          cfn-init.exe -v --stack ${AWS::StackName} --resource Ec2Instance01 --region ${AWS::Region}
+          cfn-signal.exe -e $lastexitcode --stack ${AWS::StackName} --resource Ec2Instance01 --region ${AWS::Region}
+          </powershell>
+
+  Ec2Instance02:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            c:\cfn\cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+            c:\cfn\hooks.d\cfn-auto-reloader.conf:
+              content: !Sub |
+                 [cfn-auto-reloader-hook]
+                 triggers=post.update
+                 path=Resources.Ec2Instance02.Metadata.AWS::CloudFormation::Init
+                 action=cfn-init.exe -v --stack ${AWS::StackName} --resource Ec2Instance02 --region ${AWS::Region}
+            c:\cfn\scripts\Setup-config1.ps1:
+              content: |
+                 Add-Type -Assembly System.Windows.Forms
+                 [System.Windows.Forms.MessageBox]::Show("Setup is in progress. Please wait until setup is complete.", "Please wait","OK","Warning")
+            c:\cfn\scripts\Setup-config2.ps1:
+              content: |
+                 $log = "c:\cfn\scripts\Cfnlog.txt"
+                 echo Setup-config2-Start >> $log        
+                 tzutil /s "Tokyo Standard Time" >> $log 
+                 Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\TimeZoneInformation" -Name "RealTimeIsUniversal" -Value 1
+
+                 #Key Layout
+                 [string]$Path = "HKLM:\SYSTEM\CurrentControlSet\services\i8042prt\Parameters"
+                 Set-ItemProperty -Path $Path -Name "LayerDriver JPN" -Value "kbd106.dll"
+                 Set-ItemProperty -Path $Path -Name "OverrideKeyboardIdentifier" -Value "PCAT_106KEY"
+                 Set-ItemProperty -Path $Path -Name "OverrideKeyboardType" -Value 7
+                 Set-ItemProperty -Path $Path -Name "OverrideKeyboardSubtype" -Value 2
+   
+                 #DnsClientAddress
+                 Set-DnsClientServerAddress -InterfaceAlias * -ServerAddress "192.168.1.20" >> $log  
+
+                 Get-NetFirewallProfile | Set-NetFirewallProfile -Enabled false >> $log
+                 net user administrator P@ssw0rd
+
+                 Rename-Computer -NewName memsv01 -Force -Restart 
+                 echo Setup-config2-End >> $log
+            c:\cfn\scripts\Setup-config3.ps1:
+              content: |
+                 if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("Administrators")) { Start-Process powershell.exe "-File `"$PSCommandPath`"" -Verb RunAs; exit }
+                 $log = "c:\cfn\scripts\Cfnlog.txt"
+                 $deblog = "c:\cfn\scripts\Debug-log.txt"
+                 echo Setup-config3-Start >> $log
+
+                 $computerName = '192.168.1.20'
+                 $adminPass = 'P@ssw0rd'
+                 $adminUser = 'administrator'
+                 $securePass = ConvertTo-SecureString $adminPass -AsPlainText -Force
+                 $cred = New-Object System.Management.Automation.PSCredential "$computerName\$adminUser", $securePass
+                 New-PSDrive -Name 'B' -PSProvider FileSystem -Root "\\$computerName\C`$" -Credential $cred
+                 echo memsv01-RenameEnd >> B:\memsv01-RenameEndFlag.txt
+                 Remove-PSDrive -Name 'B'
+                 
+                 while ($true){
+                     if (Test-Path -Path "C:\DC-setupEndFlag.txt"){
+                       break
+                      }
+                    Start-Sleep -Seconds 30                 
+                   }
+
+                 Start-Sleep -Seconds 330
+                 $User = "corp\administrator"
+                 $PWord = ConvertTo-SecureString -String "P@ssw0rd" -AsPlainText -Force
+                 $Credential = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $User, $PWord
+                 Add-Computer -DomainName "corp.local" -Credential $Credential -Force -Restart
+                 echo Setup-config3-End >> $log
+
+            c:\cfn\scripts\Setup-config4.ps1:
+              content: |
+                 Add-Type -Assembly System.Windows.Forms
+                 [System.Windows.Forms.MessageBox]::Show("Setup is complete.Let's get started.", "Setup is complete.","OK","Information")
+            c:\cfn\scripts\Setup-config5.ps1:
+              content: |
+                 if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("Administrators")) { Start-Process powershell.exe "-File `"$PSCommandPath`"" -Verb RunAs; exit }
+                 $log = "c:\cfn\scripts\Cfnlog.txt"
+                 echo Setup-config5-Start >> $log 
+
+                 #Password Expires False
+                 wmic UserAccount where Name='administrator' set PasswordExpires=False
+
+                 #IE ESC Administrators Off
+                 Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components\{A509B1A7-37EF-4b3f-8CFC-4F3A74704073}' -Name "IsInstalled" -Value 0
+
+                 echo Setup-config5-End >> $log
+          commands:
+            2-setup-config:
+              command: 'powershell.exe -File c:\cfn\scripts\Setup-config2.ps1'
+              waitAfterCompletion: forever
+            3-setup-config:
+              command: 'powershell.exe -File c:\cfn\scripts\Setup-config3.ps1'
+              waitAfterCompletion: forever
+            5-setup-config:
+              command: 'powershell.exe -File c:\cfn\scripts\Setup-config5.ps1'
+              waitAfterCompletion: '0'
+          services:
+            windows:
+              cfn-hup:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - c:\cfn\cfn-hup.conf
+                  - c:\cfn\hooks.d\cfn-auto-reloader.conf
+    Properties:
+      InstanceType: !Ref Ec2InstanceType
+      ImageId: !Ref Ec2ImageId
+      LaunchTemplate: 
+        LaunchTemplateName: !Sub ${SystemName}-IMDSV2
+        Version: 1
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - Ref: SVSecuritygroup
+          SubnetId:
+            Ref: PublicSubnet01
+          PrivateIpAddress: 192.168.1.30
+      IamInstanceProfile: !Ref InstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-memsv01
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          cfn-init.exe -v --stack ${AWS::StackName} --resource Ec2Instance02 --region ${AWS::Region}
+          cfn-signal.exe -e $lastexitcode --stack ${AWS::StackName} --resource Ec2Instance02 --region ${AWS::Region}
+          </powershell>
+
+Outputs:
+  VpcID:
+    Value: !Ref VPC
+    Export:
+      Name: VpcId
+  SgID:
+    Value: !Ref SVSecuritygroup
+    Export:
+      Name: SVSecuritygroupID
+  SubnetID:
+    Value: !Ref PublicSubnet01
+    Export:
+      Name: PublicSubnetID
+  InstanceProfileID:
+    Value: !Ref InstanceProfile
+    Export:
+      Name: InstanceProfileID
